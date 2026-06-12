@@ -14,7 +14,11 @@ A desktop kitty that sleeps, wanders around, and keeps you company
 - can be easily extended to a whole desktop pet program with simple oop and some gui
 
 ## Run Instructions
-- open the root folder where the project is installed and run ``py main.py``
+- 
 
 ## Demo
 <img src="demo.gif" alt="demo"/>
+
+
+## Inspired by
+Link-https://github.com/1ilit/Desktop-Cat

@@ -1,13 +1,21 @@
 use eframe::egui;
 use std::time::{Duration, Instant};
 
+// Registering all of our decoupled architecture modules
+pub mod ai;
+pub mod diagnostics;
+pub mod intro;
+pub mod windows_api;
+
 fn main() -> Result<(), eframe::Error> {
+    windows_api::log_diagnostic("INFO", "Starting master framework compilation sequence...");
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_decorations(false)        // Borderless/No title bar
-            .with_transparent(true)         // Native OS transparency
-            .with_always_on_top()           // Keep above all apps
-            .with_inner_size([72.0, 64.0]), // Window bounds
+            .with_transparent(true)         // Request native OS transparency
+            .with_always_on_top()           // Keep above all desktop windows
+            .with_inner_size([72.0, 64.0]), // Let egui scale this baseline logically
         ..Default::default()
     };
 
@@ -15,16 +23,13 @@ fn main() -> Result<(), eframe::Error> {
         "Rust Desktop Cat",
         options,
         Box::new(|cc| {
-            // Initialize the image loaders so egui can read the compiled PNGs
             egui_extras::install_image_loaders(&cc.egui_ctx);
-
             Box::new(Ket::new(cc))
         }),
     )
 }
 
 struct Ket {
-    // Assets baked directly into the executable binary
     idle: Vec<egui::ImageSource<'static>>,
     idle_to_sleeping: Vec<egui::ImageSource<'static>>,
     sleeping: Vec<egui::ImageSource<'static>>,
@@ -32,29 +37,26 @@ struct Ket {
     walking_left: Vec<egui::ImageSource<'static>>,
     walking_right: Vec<egui::ImageSource<'static>>,
 
-    // Window and logic variables
     x: f32,
     y: f32,
     screen_width: f32,
+    screen_height: f32,
+    scale_factor: f32,
     i_frame: usize,
-    state: u8,
-    event_number: u32,
     last_update: Instant,
-    frame_delay: Duration,
+
+    intro_engine: intro::IntroSequence,
+    ai_brain: ai::BehaviorBrain,
+
+    // Performance Audit State Tracking Variables
+    resource_monitor: diagnostics::ResourceMonitor,
+    last_perf_sample: Instant,
 }
 
 impl Ket {
-    fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        // Find screen width & calculate taskbar coordinates natively via context
-        let monitor_size = cc.egui_ctx.screen_rect();
-        let screen_width = monitor_size.width();
-        let work_height = monitor_size.height();
+    fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let metrics = windows_api::fetch_desktop_metrics();
 
-        // Match your starting location: 80% screen width, sitting right on top of taskbar
-        let x = screen_width * 0.8;
-        let y = work_height - 64.0;
-
-        // Baking all asset frames directly into compilation memory
         let idle = vec![
             egui::include_image!("../assets/idle1.png"),
             egui::include_image!("../assets/idle2.png"),
@@ -103,111 +105,98 @@ impl Ket {
             sleeping_to_idle,
             walking_left,
             walking_right,
-            x,
-            y,
-            screen_width,
+            x: 0.0,
+            y: 0.0,
+            screen_width: metrics.work_width,
+            screen_height: metrics.work_height,
+            scale_factor: metrics.scale_factor,
             i_frame: 0,
-            state: 1,
-            event_number: rand_range(1, 3),
             last_update: Instant::now(),
-            frame_delay: Duration::from_millis(100),
+            intro_engine: intro::IntroSequence::new(),
+            ai_brain: ai::BehaviorBrain::new(),
+            resource_monitor: diagnostics::ResourceMonitor::new(),
+            last_perf_sample: Instant::now(),
         }
     }
 
-    // Handles logic loops and random events
-    fn handle_event_logic(&mut self) {
-        let idle_num = 1..=11;
-        let walk_left = 13..=15;
-        let walk_right = 16..=18;
-        let sleep_num = 19..=25;
-
-        if idle_num.contains(&self.event_number) {
-            self.state = 0;
-            self.frame_delay = Duration::from_millis(400);
-        } else if self.event_number == 12 {
-            self.state = 1;
-            self.frame_delay = Duration::from_millis(100);
-        } else if walk_left.contains(&self.event_number) {
-            self.state = 4;
-            self.frame_delay = Duration::from_millis(100);
-        } else if walk_right.contains(&self.event_number) {
-            self.state = 5;
-            self.frame_delay = Duration::from_millis(100);
-        } else if sleep_num.contains(&self.event_number) {
-            self.state = 2;
-            self.frame_delay = Duration::from_millis(400);
-        } else if self.event_number == 26 {
-            self.state = 3;
-            self.frame_delay = Duration::from_millis(100);
-        }
-    }
-
-    // Increments frames or rolls for new sequence transitions
-    fn animate(&mut self, total_frames: usize, min_rand: u32, max_rand: u32) {
+    fn advance_animation_frame(&mut self, total_frames: usize, min_roll: u32, max_roll: u32) {
         if self.i_frame < total_frames - 1 {
             self.i_frame += 1;
         } else {
             self.i_frame = 0;
-            self.event_number = rand_range(min_rand, max_rand);
+            self.ai_brain.event_number = rand_range(min_roll, max_roll);
         }
     }
 }
 
 impl eframe::App for Ket {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Run logic step when frame-delay timer ticks over
-        if self.last_update.elapsed() >= self.frame_delay {
-            self.handle_event_logic();
+        // Trigger our performance monitoring loop exactly once every 5 seconds
+        if self.last_perf_sample.elapsed() >= Duration::from_secs(5) {
+            self.resource_monitor.sample_usage();
+            self.last_perf_sample = Instant::now();
+        }
 
-            match self.state {
-                0 => {
-                    let max = self.idle.len();
-                    self.animate(max, 1, 18);
+        let current_delay = if self.intro_engine.current_phase != intro::IntroPhase::Done {
+            Duration::from_millis(100)
+        } else {
+            self.ai_brain.frame_delay
+        };
+
+        if self.last_update.elapsed() >= current_delay {
+            let coordinates_changed = if self.intro_engine.current_phase != intro::IntroPhase::Done {
+                let mut animate_hook = || {
+                    let total_walk_frames = self.walking_left.len();
+                    if self.i_frame < total_walk_frames - 1 {
+                        self.i_frame += 1;
+                    } else {
+                        self.i_frame = 0;
+                    }
+                };
+
+                self.intro_engine.tick_sequence(
+                    &mut self.x,
+                    &mut self.y,
+                    self.screen_width,
+                    self.screen_height,
+                    self.scale_factor,
+                    &mut animate_hook,
+                )
+            } else {
+                self.ai_brain.interpret_new_event();
+                
+                match self.ai_brain.current_state {
+                    ai::CatState::Idle => { let total = self.idle.len(); self.advance_animation_frame(total, 1, 18); }
+                    ai::CatState::IdleToSleeping => { let total = self.idle_to_sleeping.len(); self.advance_animation_frame(total, 19, 19); }
+                    ai::CatState::Sleeping => { let total = self.sleeping.len(); self.advance_animation_frame(total, 19, 26); }
+                    ai::CatState::SleepingToIdle => { let total = self.sleeping_to_idle.len(); self.advance_animation_frame(total, 1, 1); }
+                    ai::CatState::WalkingLeft => { let total = self.walking_left.len(); self.advance_animation_frame(total, 1, 18); }
+                    ai::CatState::WalkingRight => { let total = self.walking_right.len(); self.advance_animation_frame(total, 1, 18); }
                 }
-                1 => {
-                    let max = self.idle_to_sleeping.len();
-                    self.animate(max, 19, 19);
-                }
-                2 => {
-                    let max = self.sleeping.len();
-                    self.animate(max, 19, 26);
-                }
-                3 => {
-                    let max = self.sleeping_to_idle.len();
-                    self.animate(max, 1, 1);
-                }
-                4 => {
-                    if self.x > 0.0 { self.x -= 3.0; }
-                    let max = self.walking_left.len();
-                    self.animate(max, 1, 18);
-                }
-                5 => {
-                    if self.x < (self.screen_width - 72.0) { self.x += 3.0; }
-                    let max = self.walking_right.len();
-                    self.animate(max, 1, 18);
-                }
-                _ => {} 
+
+                self.ai_brain.tick_roaming(&mut self.x, self.screen_width, self.scale_factor)
+            };
+
+            if coordinates_changed {
+                ctx.send_viewport_cmd(egui::ViewportCommand::OuterPosition(egui::pos2(self.x, self.y)));
             }
-
-            // Note: The problematic OuterPosition command has been safely removed from here
             self.last_update = Instant::now();
         }
 
-        // Draw the cat texture onto clear OS layer
-        let current_texture = match self.state {
-            0 => &self.idle[self.i_frame],
-            1 => &self.idle_to_sleeping[self.i_frame],
-            2 => &self.sleeping[self.i_frame],
-            3 => &self.sleeping_to_idle[self.i_frame],
-            4 => &self.walking_left[self.i_frame],
-            5 => &self.walking_right[self.i_frame],
-            _ => &self.idle[0],
+        let current_texture = if self.intro_engine.current_phase != intro::IntroPhase::Done {
+            &self.walking_left[self.i_frame]
+        } else {
+            match self.ai_brain.current_state {
+                ai::CatState::Idle => &self.idle[self.i_frame],
+                ai::CatState::IdleToSleeping => &self.idle_to_sleeping[self.i_frame],
+                ai::CatState::Sleeping => &self.sleeping[self.i_frame],
+                ai::CatState::SleepingToIdle => &self.sleeping_to_idle[self.i_frame],
+                ai::CatState::WalkingLeft => &self.walking_left[self.i_frame],
+                ai::CatState::WalkingRight => &self.walking_right[self.i_frame],
+            }
         };
 
-        let panel_frame = egui::Frame {
-            fill: egui::Color32::TRANSPARENT,
-            ..Default::default()
-        };
+        let panel_frame = egui::Frame::none().fill(egui::Color32::TRANSPARENT);
 
         egui::CentralPanel::default()
             .frame(panel_frame)
@@ -217,12 +206,11 @@ impl eframe::App for Ket {
                 });
             });
 
-        // Loop the UI repaint refresh
-        ctx.request_repaint();
+        // ctx.request_repaint();
+        ctx.request_repaint_after(current_delay);
     }
 }
 
-// Minimal, lightweight pseudo-random number generator to avoid big dependencies
 fn rand_range(min: u32, max: u32) -> u32 {
     use std::collections::hash_map::RandomState;
     use std::hash::{BuildHasher, Hasher};
@@ -231,4 +219,3 @@ fn rand_range(min: u32, max: u32) -> u32 {
     let raw = hasher.finish() as u32;
     (raw % (max - min + 1)) + min
 }
-
